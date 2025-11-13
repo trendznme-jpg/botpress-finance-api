@@ -1,84 +1,85 @@
-// index.js
+// Updated API deployment for query endpoint
+// D:\city-finance-api\index.js
 
-const express = require('express');
-const { Pool } = require('pg');
-const cors = require('cors');
+import express from "express";
+import pkg from "pg";
+import cors from "cors";
 
-// --- 1. Database Connection Configuration ---
-// IMPORTANT: Your Neon connection string is already here!
-const connectionString = process.env.DATABASE_URL || 'postgresql://neondb_owner:npg_SlsjcPh6ea1b@ep-proud-dream-adfn1lly-pooler.c-2.us-east-1.aws.neon.tech/neondb?sslmode=require&channel_binding=require';
-
-const pool = new Pool({
-    connectionString: connectionString,
-    // Add SSL configuration if you run into connection issues locally
-    // ssl: { rejectUnauthorized: false } 
-});
-
+const { Pool } = pkg;
 const app = express();
-const port = process.env.PORT || 3000;
-
-// Middleware
-app.use(cors()); // Allows your Botpress flow to access the API
 app.use(express.json());
+app.use(cors());
 
-// --- 2. API Endpoints ---
-
-// Health Check Endpoint 
-app.get('/', (req, res) => {
-    res.send('Municipal Financial Data API is running!');
+// --- PostgreSQL connection ---
+const pool = new Pool({
+  connectionString:
+    "postgresql://neondb_owner:npg_SlsjcPh6ea1b@ep-proud-dream-adfn1lly-pooler.c-2.us-east-1.aws.neon.tech/neondb?sslmode=require&channel_binding=require",
+  ssl: {
+    rejectUnauthorized: false,
+  },
 });
 
-// GET /api/financial-records
-// Lists all records (with optional search filter)
-app.get('/api/financial-records', async (req, res) => {
-    try {
-        // *** UPDATED TABLE NAME ***
-        let query = 'SELECT * FROM city_finance'; 
-        const { city, year } = req.query; // Check for optional query parameters
-        const params = [];
+// --- FLEXIBLE QUERY ENDPOINT ---
+app.post("/api/query", async (req, res) => {
+  const { cities, metric, year, queryType, limit } = req.body;
+  let sql = "";
 
-        if (city) {
-            params.push(`%${city}%`);
-            query += ' WHERE city_names ILIKE $1'; 
-        } else if (year) {
-            params.push(year);
-            query += ' WHERE financial_year = $1';
-        }
+  if (!cities || !metric) {
+    return res
+      .status(400)
+      .json({ error: "Missing required parameters: cities and metric." });
+  }
 
-        const result = await pool.query(query, params);
-        res.json(result.rows);
-    } catch (err) {
-        console.error('Error fetching records:', err);
-        res.status(500).json({ error: 'Internal Server Error' });
-    }
+  if (queryType === "ranking") {
+    const rankLimit = parseInt(limit) || 5;
+    sql = `
+      SELECT ulb_name, "${metric}", financial_year 
+      FROM city_finance 
+      WHERE financial_year = '${year || "2021-22"}'
+      ORDER BY "${metric}" DESC 
+      LIMIT ${rankLimit};
+    `;
+  } else {
+    const ulbList = cities
+      .map((city) => `'${city.replace(/'/g, "''")}'`)
+      .join(", ");
+    const yearCondition =
+      year && Array.isArray(year) && year.length > 0
+        ? `AND financial_year IN (${year.map((y) => `'${y}'`).join(", ")})`
+        : "";
+
+    sql = `
+      SELECT ulb_name, financial_year, "${metric}" 
+      FROM city_finance 
+      WHERE ulb_name IN (${ulbList})
+      ${yearCondition}
+      ORDER BY ulb_name, financial_year DESC;
+    `;
+  }
+
+  console.log("Executing SQL:", sql);
+
+  try {
+    const client = await pool.connect();
+    const result = await client.query(sql);
+    client.release();
+
+    res.json({ data: result.rows, sql: sql });
+  } catch (err) {
+    console.error("Database query failed:", err.message);
+    res
+      .status(500)
+      .json({ error: "Database query execution failed.", details: err.message });
+  }
 });
 
-// GET /api/financial-records/ulb/:name
-// Gets financial data for a specific ULB (e.g., /ulb/Dhanbad Municipal Corporation)
-app.get('/api/financial-records/ulb/:name', async (req, res) => {
-    const ulbName = req.params.name;
-    try {
-        const query = `
-            -- *** UPDATED TABLE NAME ***
-            SELECT * FROM city_finance
-            WHERE ulb_name ILIKE $1 
-            ORDER BY financial_year DESC`;
-
-        // Using a wildcard search to handle small variations in the name
-        const result = await pool.query(query, [`%${ulbName}%`]); 
-
-        if (result.rows.length === 0) {
-            return res.status(404).json({ error: 'ULB not found or no data available' });
-        }
-
-        res.json(result.rows);
-    } catch (err) {
-        console.error('Error fetching ULB data:', err);
-        res.status(500).json({ error: 'Internal Server Error' });
-    }
+// --- Default route ---
+app.get("/", (req, res) => {
+  res.send("City Finance API is running 🚀");
 });
 
-// --- 3. Start Server ---
-app.listen(port, () => {
-    console.log(`Server listening at http://localhost:${port}`);
+// --- Start server ---
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => {
+  console.log(`✅ Server running on http://localhost:${PORT}`);
 });
